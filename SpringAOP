@@ -1,0 +1,222 @@
+
+
+https://github.com/Snailclimb/JavaGuide/blob/main/docs/system-design/framework/spring/ioc-and-aop.md
+# AOP的概念
+Logging类就是一个切面(aspect)
+selectGetName是切点(pointcut)
+beforeAdvice是通知(adivce)
+在调用com.gfg.Student.getName()方法的时候就是连接点(joint point)
+织入（Weaving）：在运行时，Spring 会把Logging切面应用到test对象上。
+```
+@Aspect
+public class Logging {
+   @PointCut("execution(* com.gfg.Student.getName(..))")
+   private void selectGetName(){}
+  
+   @Before("selectGetName()")
+   public void beforeAdvice(){
+      ...
+   }  
+}
+```
+
+AbstractAutoProxyCreator#wrapIfNecessary
+```java
+// 获取所有的拦截器
+Object[] specificInterceptors = this.getAdvicesAndAdvisorsForBean(bean.getClass(), beanName, (TargetSource)null);
+
+```
+- LogArgsAdvice
+- LogResultAdvice
+这里拦截的就是上面配置的的两个Advice（通知）
+
+
+AbstractAutoProxyCreator#createProxy
+
+```java
+BeanPostProcessor
+InstantiationAwareBeanPostProcessor
+SmartInstantiationAwareBeanPostProcessor
+AbstractAutoProxyCreator
+AbstractAdvisorAutoProxyCreator
+DefaultAdvisorAutoProxyCreator
+```
+
+
+# 调用关系
+属于ioc范畴
+- AbstractBeanFactory
+- DefaultSingletonBeanRegistry
+  - getSingleton
+  - getObject
+- AbstractAutowireCapableBeanFactory
+	- createBean
+	- resolveBeforeInstantiation
+	- applyBeanPostProcessorsBeforeInstantiation
+
+
+属于aop范畴
+- AbstractAutoProxyCreator
+	- postProcessBeforeInstantiation
+	- isInfrastructureClass
+
+把几个关于AOP的入口找出来
+- createBean -> resolveBeforeInstantiation -> applyBeanPostProcessorsBeforeInstantiation
+  如果这里返回为null就不走动态代理的逻辑
+- createBean -> doCreateBean -> initializeBean -> invokeAwareMethods -> DefaultAdvisorAutoProxyCreator#setBeanName
+  initializeBean -> invokeAwareMethods 这里是实现BeanNameAware的setBeanName功能
+  initializeBean -> applyBeanPostProcessorsAfterInitialization -> AbstractAutoProxyCreator#postProcessAfterInitialization 这里是真正实现AOP的入口
+
+这个是getProxy的流程, 
+AbstractAutowireCapableBeanFactory#createBean -> doCreateBean -> initializeBean -> applyBeanPostProcessorsAfterInitialization -> AbstractAutoProxyCreator#wrapIfNecessary -> createProxy ->  ProxyFactory#getProxy -> JdkDynamicAopProxy#getProxy 
+
+```java
+createBean(){
+	...
+	beanInstance = this.resolveBeforeInstantiation(beanName, mbdToUse);
+	...
+	beanInstance = this.doCreateBean(beanName, mbdToUse, args);
+}
+
+doCreateBean(){
+	...
+	exposedObject = this.initializeBean(beanName, exposedObject, mbd);
+	...
+}
+
+initializeBean(){
+	...
+	this.invokeAwareMethods(beanName, bean);
+	...
+}
+```
+
+```
+AbstractBeanFactory#getBean -> dogetBean -> DefaultSingletonBeanRegistry#getSingleton -> getObject -> ... -> AbstractAutowireCapableBeanFactory#createBean -> resolveBeforeInstantiation -> applyBeanPostProcessorsBeforeInstantiation -> AbstractAutoProxyCreator#postProcessBeforeInstantiation -> isInfrastructureClass
+```
+
+## 源码
+
+postProcessAfterInitialization
+```java
+/**
+ * Wrap the given bean if necessary, i.e. if it is eligible for being proxied.
+ * @param bean the raw bean instance
+ * @param beanName the name of the bean
+ * @param cacheKey the cache key for metadata access
+ * @return a proxy wrapping the bean, or the raw bean instance as-is
+ */
+protected Object wrapIfNecessary(Object bean, String beanName, Object cacheKey) {
+	//存在beanName且targetSourcedBeans包含该beanName就直接返回，不创建代理了
+	if (StringUtils.hasLength(beanName) && this.targetSourcedBeans.contains(beanName)) {
+		return bean;
+	}
+	// 判断是否需要代理，flase是不需要的意思
+	if (Boolean.FALSE.equals(this.advisedBeans.get(cacheKey))) {
+		return bean;
+	}
+	//isInfrastructureClass用来排除一些基础类（如advice,pointcut等）
+	if (isInfrastructureClass(bean.getClass()) || shouldSkip(bean.getClass(), beanName)) {
+		this.advisedBeans.put(cacheKey, Boolean.FALSE);
+		return bean;
+	}
+	// Create proxy if we have advice.
+	Object[] specificInterceptors = getAdvicesAndAdvisorsForBean(bean.getClass(), beanName, null);
+	if (specificInterceptors != DO_NOT_PROXY) {
+		this.advisedBeans.put(cacheKey, Boolean.TRUE);
+		Object proxy = createProxy(
+				bean.getClass(), beanName, specificInterceptors, new SingletonTargetSource(bean));
+		this.proxyTypes.put(cacheKey, proxy.getClass());
+		return proxy;
+	}
+	this.advisedBeans.put(cacheKey, Boolean.FALSE);
+	return bean;
+}
+```
+
+postProcessBeforeInstantiation和wrapIfNecessary都会创建代理，因为前者不是主要逻辑所以暂时无视
+
+
+```java
+/**
+	 * Create an AOP proxy for the given bean.
+	 * @param beanClass the class of the bean
+	 * @param beanName the name of the bean
+	 * @param specificInterceptors the set of interceptors that is
+	 * specific to this bean (may be empty, but not null)
+	 * @param targetSource the TargetSource for the proxy,
+	 * already pre-configured to access the bean
+	 * @return the AOP proxy for the bean
+	 * @see #buildAdvisors
+	 */
+	protected Object createProxy(Class<?> beanClass, @Nullable String beanName,
+			Object @Nullable [] specificInterceptors, TargetSource targetSource) {
+
+		return buildProxy(beanClass, beanName, specificInterceptors, targetSource, false);
+	}
+```
+
+
+```java
+private Object buildProxy(Class<?> beanClass, @Nullable String beanName,
+			Object @Nullable [] specificInterceptors, TargetSource targetSource, boolean classOnly) {
+
+		if (this.beanFactory instanceof ConfigurableListableBeanFactory clbf) {
+			AutoProxyUtils.exposeTargetClass(clbf, beanName, beanClass);
+		}
+
+		ProxyFactory proxyFactory = new ProxyFactory();
+		proxyFactory.copyFrom(this);
+
+		if (proxyFactory.isProxyTargetClass()) {
+			// Explicit handling of JDK proxy targets and lambdas (for introduction advice scenarios)
+			if (Proxy.isProxyClass(beanClass) || ClassUtils.isLambdaClass(beanClass)) {
+				// Must allow for introductions; can't just set interfaces to the proxy's interfaces only.
+				for (Class<?> ifc : beanClass.getInterfaces()) {
+					proxyFactory.addInterface(ifc);
+				}
+			}
+		}
+		else {
+			// No proxyTargetClass flag enforced, let's apply our default checks...
+			if (shouldProxyTargetClass(beanClass, beanName)) {
+				proxyFactory.setProxyTargetClass(true);
+			}
+			else {
+				evaluateProxyInterfaces(beanClass, proxyFactory);
+			}
+		}
+
+		Advisor[] advisors = buildAdvisors(beanName, specificInterceptors);
+		proxyFactory.addAdvisors(advisors);
+		proxyFactory.setTargetSource(targetSource);
+		customizeProxyFactory(proxyFactory);
+
+		proxyFactory.setFrozen(this.freezeProxy);
+		if (advisorsPreFiltered()) {
+			proxyFactory.setPreFiltered(true);
+		}
+
+		// Use original ClassLoader if bean class not locally loaded in overriding class loader
+		ClassLoader classLoader = getProxyClassLoader();
+		if (classLoader instanceof SmartClassLoader smartClassLoader && classLoader != beanClass.getClassLoader()) {
+			classLoader = smartClassLoader.getOriginalClassLoader();
+		}
+		return (classOnly ? proxyFactory.getProxyClass(classLoader) : proxyFactory.getProxy(classLoader));
+	}
+```
+
+
+# QA
+AbstractAutoProxyCreator#postProcessBeforeInstantiation 和 AbstractAutoProxyCreator#postProcessAfterInitialization
+这两个方法都和AOP有关，具体区别又是什么？
+
+| 方法                             | 执行时机       | 核心作用                            | 典型场景                         |
+|--------------------------------|------------|---------------------------------|------------------------------|
+| postProcessBeforeInstantiation | 实例化前（构造前）  | 短路 Bean 创建流程，提前创建代理（如处理循环依赖）。   | 循环依赖、特殊 Bean 强制代理。           |
+| postProcessAfterInitialization | 初始化后（完全创建） | 正常创建代理，基于方法匹配和 Advisor 增强 Bean。 | 基于注解的 AOP（如 @Transactional）。 |
+
+
+
+
+
