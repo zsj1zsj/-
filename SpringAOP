@@ -23,13 +23,13 @@ public class Logging {
 AbstractAutoProxyCreator#wrapIfNecessary
 ```java
 // 获取所有的拦截器
+// 这里还是会根据Pointcut匹配target的
 Object[] specificInterceptors = this.getAdvicesAndAdvisorsForBean(bean.getClass(), beanName, (TargetSource)null);
 
 ```
 - LogArgsAdvice
 - LogResultAdvice
 这里拦截的就是上面配置的的两个Advice（通知）
-
 
 AbstractAutoProxyCreator#createProxy
 
@@ -67,9 +67,11 @@ DefaultAdvisorAutoProxyCreator
   initializeBean -> invokeAwareMethods 这里是实现BeanNameAware的setBeanName功能
   initializeBean -> applyBeanPostProcessorsAfterInitialization -> AbstractAutoProxyCreator#postProcessAfterInitialization 这里是真正实现AOP的入口
 
-这个是getProxy的流程, 
+这个是Spring AOP的流程, 
 AbstractAutowireCapableBeanFactory#createBean -> doCreateBean -> initializeBean -> applyBeanPostProcessorsAfterInitialization -> AbstractAutoProxyCreator#wrapIfNecessary -> createProxy ->  ProxyFactory#getProxy -> JdkDynamicAopProxy#getProxy 
 
+AbstractAutoProxyCreator是beanpostprocessor,实现了接口的postProcessAfterInitialization方法
+DefaultAopProxyFactory就负责createAopProxy，该方法会调用JdkDynamicAopProxy的getProxy方法
 ```java
 createBean(){
 	...
@@ -97,116 +99,112 @@ AbstractBeanFactory#getBean -> dogetBean -> DefaultSingletonBeanRegistry#getSing
 
 ## 源码
 
-postProcessAfterInitialization
+### 责任链
+- JdkDynamicAopProxy
+- ReflectiveMethodInvocation
+- MethodBeforeAdviceInterceptor 适配 AspectJMethodBeforeAdvice
+- AfterReturningAdviceInterceptor 适配 AspectJAfterReturningAdvice
+- ThrowsAdviceInterceptor 适配 AspectJAfterThrowingAdvice
+  适配器模式，before adivce没有invoke方法， 它的 invoke 方法掉 adivce 的before方法
+
+around的情况
+- before, 先执行 before advice
+- 执行target逻辑
+- after, 执行after advice
+
+AspectJMethodBeforeAdvice
 ```java
-/**
- * Wrap the given bean if necessary, i.e. if it is eligible for being proxied.
- * @param bean the raw bean instance
- * @param beanName the name of the bean
- * @param cacheKey the cache key for metadata access
- * @return a proxy wrapping the bean, or the raw bean instance as-is
- */
-protected Object wrapIfNecessary(Object bean, String beanName, Object cacheKey) {
-	//存在beanName且targetSourcedBeans包含该beanName就直接返回，不创建代理了
-	if (StringUtils.hasLength(beanName) && this.targetSourcedBeans.contains(beanName)) {
-		return bean;
-	}
-	// 判断是否需要代理，flase是不需要的意思
-	if (Boolean.FALSE.equals(this.advisedBeans.get(cacheKey))) {
-		return bean;
-	}
-	//isInfrastructureClass用来排除一些基础类（如advice,pointcut等）
-	if (isInfrastructureClass(bean.getClass()) || shouldSkip(bean.getClass(), beanName)) {
-		this.advisedBeans.put(cacheKey, Boolean.FALSE);
-		return bean;
-	}
-	// Create proxy if we have advice.
-	Object[] specificInterceptors = getAdvicesAndAdvisorsForBean(bean.getClass(), beanName, null);
-	if (specificInterceptors != DO_NOT_PROXY) {
-		this.advisedBeans.put(cacheKey, Boolean.TRUE);
-		Object proxy = createProxy(
-				bean.getClass(), beanName, specificInterceptors, new SingletonTargetSource(bean));
-		this.proxyTypes.put(cacheKey, proxy.getClass());
-		return proxy;
-	}
-	this.advisedBeans.put(cacheKey, Boolean.FALSE);
-	return bean;
+public void before(Method method, Object[] args, @Nullable Object target) throws Throwable {
+	invokeAdviceMethod(getJoinPointMatch(), null, null);
 }
 ```
 
-postProcessBeforeInstantiation和wrapIfNecessary都会创建代理，因为前者不是主要逻辑所以暂时无视
-
-
+AspectJAfterAdvice
 ```java
-/**
-	 * Create an AOP proxy for the given bean.
-	 * @param beanClass the class of the bean
-	 * @param beanName the name of the bean
-	 * @param specificInterceptors the set of interceptors that is
-	 * specific to this bean (may be empty, but not null)
-	 * @param targetSource the TargetSource for the proxy,
-	 * already pre-configured to access the bean
-	 * @return the AOP proxy for the bean
-	 * @see #buildAdvisors
-	 */
-	protected Object createProxy(Class<?> beanClass, @Nullable String beanName,
-			Object @Nullable [] specificInterceptors, TargetSource targetSource) {
-
-		return buildProxy(beanClass, beanName, specificInterceptors, targetSource, false);
+public Object invoke(MethodInvocation mi) throws Throwable {
+		try {
+			//这个就是ReflectiveMethodInvocation
+			//因为是after 所以先执行下一个拦截器
+			return mi.proceed();
+		}
+		finally {
+			// 这里是after的逻辑
+			invokeAdviceMethod(getJoinPointMatch(), null, null);
+		}
 	}
 ```
 
+AspectJAroundAdvice
+```
+public Object invoke(MethodInvocation mi) throws Throwable {
+	if (!(mi instanceof ProxyMethodInvocation pmi)) {
+		throw new IllegalStateException("MethodInvocation is not a Spring ProxyMethodInvocation: " + mi);
+	}
+	ProceedingJoinPoint pjp = lazyGetProceedingJoinPoint(pmi);
+	JoinPointMatch jpm = getJoinPointMatch(pmi);
+	return invokeAdviceMethod(pjp, jpm, null, null);
+}
+```
+
+ProceedingJoinPoint
+pjp.proceed其实调的就是mi.proceed, 也就是ReflectiveMethodInvocation（责任链实现）
+```java
+# MethodInvocationProceedingJoinPoint
+public Object proceed() throws Throwable {  
+  return this.methodInvocation.invocableClone().proceed();  
+}
+```
+
+
+## Pointcut 匹配
+AbstractAdvisorAutoProxyCreator
+- findAdvisorsThatCanApply
+  用来匹配advisors是否使用target
+wrapIfNecessary -> getAdvicesAndAdvisorsForBean -> findEligibleAdvisors -> findAdvisorsThatCanApply -> findAdvisorsThatCanApply -> AopUtils#canApply -> canApply
+最后会调用IntroductionAdvisor接口的getClassFilter进行匹配
+
+有些代理无法在静态匹配完整代理， 还需要动态匹配一次具体逻辑在DefaultAdvisorChainFactory#getInterceptorsAndDynamicInterceptionAdvice
+这个例子里的name需要动态获取，无法静态取得
+```java
+@Before("execution(* com.example.*.*(..))" && args(name))
+public void log(String name){
+	...
+}
+```
+
+### 匹配代码
+```java
+protected Object wrapIfNecessary(Object bean, String beanName, Object cacheKey) {
+...
+// getAdvicesAndAdvisorsForBean会调用下面的findAdvisorsThatCanApply， 根据Pointcut决定是否加入列表
+Object[] specificInterceptors = getAdvicesAndAdvisorsForBean(bean.getClass(), beanName, null);
+}
+```
 
 ```java
-private Object buildProxy(Class<?> beanClass, @Nullable String beanName,
-			Object @Nullable [] specificInterceptors, TargetSource targetSource, boolean classOnly) {
-
-		if (this.beanFactory instanceof ConfigurableListableBeanFactory clbf) {
-			AutoProxyUtils.exposeTargetClass(clbf, beanName, beanClass);
+	/**
+	 * Can the given advisor apply at all on the given class?
+	 * <p>This is an important test as it can be used to optimize out an advisor for a class.
+	 * This version also takes into account introductions (for IntroductionAwareMethodMatchers).
+	 * @param advisor the advisor to check
+	 * @param targetClass class we're testing
+	 * @param hasIntroductions whether the advisor chain for this bean includes
+	 * any introductions
+	 * @return whether the pointcut can apply on any method
+	 */
+	public static boolean canApply(Advisor advisor, Class<?> targetClass, boolean hasIntroductions) {
+		if (advisor instanceof IntroductionAdvisor ia) {
+			return ia.getClassFilter().matches(targetClass);
 		}
-
-		ProxyFactory proxyFactory = new ProxyFactory();
-		proxyFactory.copyFrom(this);
-
-		if (proxyFactory.isProxyTargetClass()) {
-			// Explicit handling of JDK proxy targets and lambdas (for introduction advice scenarios)
-			if (Proxy.isProxyClass(beanClass) || ClassUtils.isLambdaClass(beanClass)) {
-				// Must allow for introductions; can't just set interfaces to the proxy's interfaces only.
-				for (Class<?> ifc : beanClass.getInterfaces()) {
-					proxyFactory.addInterface(ifc);
-				}
-			}
+		else if (advisor instanceof PointcutAdvisor pca) {
+			return canApply(pca.getPointcut(), targetClass, hasIntroductions);
 		}
 		else {
-			// No proxyTargetClass flag enforced, let's apply our default checks...
-			if (shouldProxyTargetClass(beanClass, beanName)) {
-				proxyFactory.setProxyTargetClass(true);
-			}
-			else {
-				evaluateProxyInterfaces(beanClass, proxyFactory);
-			}
+			// It doesn't have a pointcut so we assume it applies.
+			return true;
 		}
-
-		Advisor[] advisors = buildAdvisors(beanName, specificInterceptors);
-		proxyFactory.addAdvisors(advisors);
-		proxyFactory.setTargetSource(targetSource);
-		customizeProxyFactory(proxyFactory);
-
-		proxyFactory.setFrozen(this.freezeProxy);
-		if (advisorsPreFiltered()) {
-			proxyFactory.setPreFiltered(true);
-		}
-
-		// Use original ClassLoader if bean class not locally loaded in overriding class loader
-		ClassLoader classLoader = getProxyClassLoader();
-		if (classLoader instanceof SmartClassLoader smartClassLoader && classLoader != beanClass.getClassLoader()) {
-			classLoader = smartClassLoader.getOriginalClassLoader();
-		}
-		return (classOnly ? proxyFactory.getProxyClass(classLoader) : proxyFactory.getProxy(classLoader));
 	}
 ```
-
-
 # QA
 AbstractAutoProxyCreator#postProcessBeforeInstantiation 和 AbstractAutoProxyCreator#postProcessAfterInitialization
 这两个方法都和AOP有关，具体区别又是什么？
