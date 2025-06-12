@@ -1,0 +1,23 @@
+条件必须是left<=right不能是left\<right
+这个是用例
+{9, 8, 10}
+如果条件是left\<right,结果会变成{9,10,8}，因为left最终只能到8的位置，而最后一步swap就会变成错误的结果。
+```java
+private static int doublePointPartition(int[] nums, int begin, int end) {
+    int left = begin, right = end - 1, pivot = nums[end];
+    while (left <= right) {
+      while (left <= right && nums[left] <= pivot) {
+        left++;
+      }
+      while (left <= right && nums[right] >= pivot) {
+        right--;
+      }
+      if(left < right) {
+        swap(nums, left, right);
+      }
+    }
+
+    swap(nums, left, end);
+    return left;
+  }
+```
