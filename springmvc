@@ -1,0 +1,163 @@
+
+## DispatcherServlet
+
+![[Pasted image 20250613111400.png]]
+
+doDispatch
+```java
+mappedHandler = getHandler(processedRequest);
+// handler是从spring容器中获取的，条件是满足实现了HandlerAdapter接口的bean
+HandlerAdapter ha = getHandlerAdapter(mappedHandler.getHandler());
+mappedHandler.applyPreHandle(processedRequest, response)
+mappedHandler.applyPostHandle(processedRequest, response, mv);
+processDispatchResult(processedRequest, response, mappedHandler, mv, dispatchException);
+```
+
+从DispatcherServlet到我自己写的controller的流程
+```java
+@RestController
+@RequestMapping
+public class MyController{
+	@GetMapping
+	public String hello(){
+		return "hello";
+	}
+}
+```
+
+## Handler
+```java
+/**
+ * Initialize the HandlerMappings used by this class.
+ * <p>If no HandlerMapping beans are defined in the BeanFactory for this namespace,
+ * we default to BeanNameUrlHandlerMapping.
+ */
+private void initHandlerMappings(ApplicationContext context) {
+	Map<String, HandlerMapping> matchingBeans =
+					BeanFactoryUtils.beansOfTypeIncludingAncestors(context, HandlerMapping.class, true, false);
+	this.handlerMappings = new ArrayList<>(matchingBeans.values());
+}
+```
+
+controller bean创建流程
+AbstractAutowireCapableBeanFactory#initializeBean -> invokeInitMethods -> RequestMappingHandlerMapping#afterPropertiesSet -> intiHanlderMethods -> detectHandlerMethods -> registerHandlerMethod -> MappingRegistry#register 
+
+```java
+this.registry.put(mapping,
+			new MappingRegistration<>(mapping, handlerMethod, directPaths, name, corsConfig != null));
+```
+
+AbstractHandlerMethodMapping
+
+```java
+private final MappingRegistry mappingRegistry = new MappingRegistry();
+
+public void register(T mapping, Object handler, Method method) {
+	
+}
+```
+
+
+## HandlerAdapters
+
+```java
+/**
+ * Initialize the HandlerAdapters used by this class.
+ * <p>If no HandlerAdapter beans are defined in the BeanFactory for this namespace,
+ * we default to SimpleControllerHandlerAdapter.
+ */
+private void initHandlerAdapters(ApplicationContext context) {
+	// 从beanfactory获取所有实现HandlerAdapter接口的bean
+	Map<String, HandlerAdapter> matchingBeans =
+					BeanFactoryUtils.beansOfTypeIncludingAncestors(context, HandlerAdapter.class, true, false);
+	// 放入handlerAdapters的list中
+	this.handlerAdapters = new ArrayList<>(matchingBeans.values());
+}
+```
+
+### HandlerAdapter的实现类
+- AbstractHandlerMthodAdapter
+- HandlerFunctionAdapter
+- HttpReqeustHandlerAdapter
+- RequestMappingHandlerAdapter
+- SimpleContorllerHandlerAdapter
+- SimpleServletHandlerAdapter
+
+![[Pasted image 20250612132248.png]]
+
+
+
+## 调用流程
+获取handler
+DispatcherServer#doDispatch -> getHandler -> AbstractHandlerMapping#getHandler -> getHandlerInternal -> AbstractHandlerMethodMapping#getHandlerInternal
+
+```java
+protected HandlerMethod getHandlerInternal(HttpServletRequest request) throws Exception {
+	// 获取请求的url
+	String lookupPath = initLookupPath(request);
+	this.mappingRegistry.acquireReadLock();
+	try {
+		// 调用具体的url查看handlermethod方法， handler
+		HandlerMethod handlerMethod = lookupHandlerMethod(lookupPath, request);
+		return (handlerMethod != null ? handlerMethod.createWithResolvedBean() : null);
+	}
+	finally {
+		this.mappingRegistry.releaseReadLock();
+	}
+}
+```
+
+RequestMappingHandlerMapping
+```java
+protected void processCandidateBean(String beanName) {
+	if (beanType != null && isHandler(beanType)) {
+		detectHandlerMethods(beanName);
+	}
+}
+
+@Override
+protected boolean isHandler(Class<?> beanType) {
+	return AnnotatedElementUtils.hasAnnotation(beanType, Controller.class);
+}
+```
+## 获取参数
+DispatcherServer#doDispatch -> AbstractHandlerMethodAdapter#handle -> RequestMappingHandlerAdapter#handleInternal -> invokeHandlerMethod -> ServletInvocableHandlerMethod#invokeAndHandle -> InvocableHandlerMethod#invokeForRequest -> getMethodArgumentValues
+```java
+protected Object[] getMethodArgumentValues(NativeWebRequest request, @Nullable ModelAndViewContainer mavContainer, Object... providedArgs) throws Exception {
+
+	
+}
+```
+
+## 看下json参数是如何转成对象
+InvocableHandlerMethod#invokeForRequest -> invokeForRequest -> getMethodArgumentValues -> getMethodArgumentValues -> HandlerMethodArgumentResolverComposite#resolveArgument -> RequestResponseBodyMethodProcessor#resolveArgument
+
+AbstractMessageConverterMethodArgumentResolver#readWithMessageConverters
+RequestResponseBodyMethodProcessor是AbstractMessageConverterMethodArgumentResolver的子类
+
+这里的converter就是MappingJackson2HttpMessageConverter,这里走的是GENERIC
+```java
+body = switch (converterTypeToUse) {
+							case BASE -> ((HttpMessageConverter<T>) converter).read(targetClass, msgToUse);
+							case GENERIC -> ((GenericHttpMessageConverter<?>) converter).read(targetType, contextClass, msgToUse);
+							case SMART -> ((SmartHttpMessageConverter<?>) converter).read(targetResolvableType, msgToUse, null);
+						};
+```
+
+getMethodArgumentValues
+
+这个是用到的resolver, RequestResponseBodyMethodProcessor
+接口 HttpMessageConverter， MappingJackson2HttpMessageConverter 是jackson的实现
+
+
+## 拦截器
+doDispatch()
+```java
+if (!mappedHandler.applyPreHandle(processedRequest, response)) {
+	return;
+}
+...
+mappedHandler.applyPostHandle(processedRequest, response, mv);
+//这里是在调afterCompletion
+processDispatchResult(processedRequest, response, mappedHandler, mv, dispatchException);
+```
