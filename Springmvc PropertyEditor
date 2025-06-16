@@ -1,0 +1,38 @@
+## PropertyEditor
+InvocableHandlerMethod#invokeForRequest -> InvocableHandlerMethod#doInvoke -> **Controller#method(这里调了beanWrapper#setPropertyValue)** ->  AbstractNestablePropertyAccessor -> TypeConverterDelegate -> **自定义PropertyEditor#setAsText**
+
+是在调BeanWrapper#setPropertyValue方法的时候
+
+```java
+public class GoodPropertyEditor extends PropertyEditorSupport {
+  @Override
+  public void setAsText(String text) throws IllegalArgumentException {
+    // 自定义转换逻辑："1"转换为true，其他值转换为false
+    if ("1".equals(text)) {
+      setValue(true);
+    } else {
+      setValue(false);
+    }
+  }
+}
+```
+
+```java
+@RequestMapping(value = "/testWrapper", produces = {"application/json; charset=UTF-8"})
+  @ResponseBody
+  public TestModel testWrapper() {
+    TestModel tm = new TestModel();
+    BeanWrapper bw = new BeanWrapperImpl(tm);
+
+    // 注册自定义属性编辑器
+    bw.registerCustomEditor(boolean.class, new GoodPropertyEditor());
+    // 也可以使用属性名来注册：
+    // bw.registerCustomEditor(boolean.class, "good", new GoodPropertyEditor());
+
+    // 设置属性值，将字符串"1"转换为布尔值true
+    bw.setPropertyValue("good", "1");
+
+    return tm;
+  }
+```
+
