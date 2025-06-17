@@ -1,0 +1,257 @@
+# 从ioc开始
+创建连接，jdbcTemplate
+AbstractAutowireCapableBeanFactory#createBeanInstance -> instantiateUsingFactoryMethod -> JdbcTemplateConfiguration#jdbcTemplate
+
+```mermaid
+flowchart TD
+    AE --> AF[JDBCController#getUsers]
+    AF --> AG[UserRepository#findAll]
+    
+    AG --> AH[UserRepository$$SpringCGLIB$$0#findAll]
+    AH --> AI[PersistenceExceptionTranslationInterceptor#invoke]
+    AI --> AJ[ReflectiveMethodInvocation#proceed]
+    AJ --> AK[AopUtils#invokeJoinpointUsingReflection]
+    AK --> AL[Method#invoke]
+    
+    AL --> AM[JdbcTemplate#query]
+    AM --> AN[JdbcTemplate#query]
+    AN --> AO[JdbcTemplate$1QueryStatementCallback#doInStatement]
+    AP --> AQ[RowMapperResultSetExtractor#extractData]
+    AQ --> AR[BeanPropertyRowMapper#mapRow]
+    
+    
+    subgraph "Controller到Service"
+        Z --> AF
+        AF --> AL
+    end
+    
+    subgraph "Spring JDBC操作"
+        AL --> AR
+    end
+```
+
+
+## DataSource
+HikariDataSource
+
+```mermaid
+flowchart TD
+    J --> K[DataSourceConfiguration$Hikari#dataSource]
+    K --> L[DataSourceBuilder#build]
+    L --> M[BeanUtils#instantiateClass]
+    M --> N[newInstance]
+    N --> O[HikariDataSource#<init>]
+
+    subgraph "数据源创建流程"
+        J --> K
+        K --> L
+        L --> M
+        M --> N
+        N --> O
+    end    
+```
+
+
+# 查询
+
+### query
+query(String sql, RowMapper\<T> rowMapper) -> \<T> T query(final String sql, final ResultSetExtractor\<T> rse) -> \<T> T execute(StatementCallback\<T> action, boolean closeResources)
+
+```java
+public <T> T execute(ConnectionCallback<T> action) throws DataAccessException {
+	Connection con = DataSourceUtils.getConnection(obtainDataSource());
+	Statement stmt = null;
+	stmt = con.createStatement();
+	// doInstatement就是stmt执行sql
+	T result = action.doInStatement(stmt);
+	handleWarnings(stmt);
+	return result;
+}
+```
+
+
+```java
+public <T> T query(final String sql, final ResultSetExtractor<T> rse) throws DataAccessException {
+		Assert.notNull(sql, "SQL must not be null");
+		Assert.notNull(rse, "ResultSetExtractor must not be null");
+		if (logger.isDebugEnabled()) {
+			logger.debug("Executing SQL query [" + sql + "]");
+		}
+
+		// Callback to execute the query.
+		class QueryStatementCallback implements StatementCallback<T>, SqlProvider {
+			@Override
+			@Nullable
+			public T doInStatement(Statement stmt) throws SQLException {
+				ResultSet rs = null;
+				try {
+					rs = stmt.executeQuery(sql);
+					return rse.extractData(rs);
+				}
+				finally {
+					JdbcUtils.closeResultSet(rs);
+				}
+			}
+			@Override
+			public String getSql() {
+				return sql;
+			}
+		}
+
+		return execute(new QueryStatementCallback(), true);
+	}
+```
+
+
+#### 提取结果
+通过反射回去entity的字段，rs结果集获取的数据mapping到对应的entity字段上。
+
+query的第二个参数rowMapper就是为了提取对应的结果
+
+ rowMapper -> new RowMapperResultSetExtractor<>(rowMapper)
+```java
+public class RowMapperResultSetExtractor<T> implements ResultSetExtractor<List<T>> {
+	public List<T> extractData(ResultSet rs) throws SQLException {
+		List<T> results = (this.rowsExpected > 0 ? new ArrayList<>(this.rowsExpected) : new ArrayList<>());
+		int rowNum = 0;
+		while (rs.next()) {
+			results.add(this.rowMapper.mapRow(rs, rowNum++));
+		}
+		return results;
+	}
+}
+```
+
+Bean
+```java
+public class BeanPropertyRowMapper<T> implements RowMapper<T> {
+	//获取entity的所有属性
+	protected void initialize(Class<T> mappedClass) {
+		this.mappedClass = mappedClass;
+		this.mappedProperties = new HashMap<>();
+		this.mappedPropertyNames = new HashSet<>();
+
+		for (PropertyDescriptor pd : BeanUtils.getPropertyDescriptors(mappedClass)) {
+			if (pd.getWriteMethod() != null) {
+				Set<String> mappedNames = mappedNames(pd);
+				for (String mappedName : mappedNames) {
+					this.mappedProperties.put(mappedName, pd);
+				}
+				this.mappedPropertyNames.add(pd.getName());
+			}
+		}
+	}
+
+	public T mapRow(ResultSet rs, int rowNumber) throws SQLException {
+		BeanWrapperImpl bw = new BeanWrapperImpl();
+
+		//mappedObject是返回值， BeanWrapperImpl是为了使用setPropertyValue
+		T mappedObject = constructMappedInstance(rs, bw);
+		bw.setBeanInstance(mappedObject);
+		
+		for (int index = 1; index <= columnCount; index++) {
+			PropertyDescriptor pd = (this.mappedProperties != null ? this.mappedProperties.get(property) : null);
+			//从结果集获取该属性的的值
+			//pd这个参数其实是为了获取pd的类型
+			Object value = getColumnValue(rs, index, pd);
+			//设置该值到BeanWrapper中
+			bw.setPropertyValue(pd.getName(), value);
+		}
+	}
+}
+```
+### insert
+```mermaid
+flowchart TD
+    A[UserRepository#save] --> B[JdbcTemplate#update]
+    B --> C[JdbcTemplate#update]
+    C --> D[JdbcTemplate#update]
+    D --> E[JdbcTemplate#execute]
+    
+    subgraph "数据更新核心流程"
+        A --> E
+    end
+    
+    classDef repositoryClass fill:#f9d6d2,stroke:#333,stroke-width:1px
+    classDef jdbcClass fill:#d2f9d9,stroke:#333,stroke-width:1px
+    
+    class A repositoryClass
+    class B,C,D,E jdbcClass
+    
+    %% 方法参数说明
+    A -.->|SQL & Object参数| B
+    B -.->|PreparedStatementCreator| C
+    C -.->|KeyHolder| D
+    D -.->|更新SQL执行| E
+```
+
+```java
+protected int update(final PreparedStatementCreator psc, @Nullable final PreparedStatementSetter pss)
+			throws DataAccessException {
+
+		logger.debug("Executing prepared SQL update");
+
+		return updateCount(execute(psc, ps -> {
+			try {
+				if (pss != null) {
+					pss.setValues(ps);
+				}
+				int rows = ps.executeUpdate();
+				if (logger.isTraceEnabled()) {
+					logger.trace("SQL update affected " + rows + " rows");
+				}
+				return rows;
+			}
+			finally {
+				if (pss instanceof ParameterDisposer parameterDisposer) {
+					parameterDisposer.cleanupParameters();
+				}
+			}
+		}, true));
+	}
+```
+
+
+## delete
+
+
+```mermaid
+flowchart TD
+    A[HTTP请求] --> B[JDBCController#userDelete]
+    B --> C[UserRepository$$SpringCGLIB$$0#deleteById]
+    C --> D[PersistenceExceptionTranslationInterceptor#invoke]
+    D --> E[ReflectiveMethodInvocation#proceed]
+    E --> F[AopUtils#invokeJoinpointUsingReflection]
+    F --> G[Method#invoke]
+    G --> H[UserRepository#deleteById]
+    H --> I[JdbcTemplate#update]
+    I --> J[JdbcTemplate#update]
+    J --> K[JdbcTemplate#update]
+    K --> L[JdbcTemplate#execute]
+    
+    subgraph "Web请求处理"
+        A --> B
+    end
+    
+    subgraph "AOP代理流程"
+        C --> G
+    end
+    
+    subgraph "JdbcTemplate删除操作"
+        H --> L
+    end
+    
+    classDef webLayer fill:#f9d6d2,stroke:#333,stroke-width:1px
+    classDef aopLayer fill:#d2d9f9,stroke:#333,stroke-width:1px
+    classDef jdbcLayer fill:#d2f9d9,stroke:#333,stroke-width:1px
+    
+    class A,B webLayer
+    class C,D,E,F,G aopLayer
+    class H,I,J,K,L jdbcLayer
+    
+    %% 关键参数传递
+    B -.->|用户ID参数| C
+    H -.->|DELETE SQL| I
+    K -.->|PreparedStatement执行| L
+```
+
