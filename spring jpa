@@ -1,0 +1,209 @@
+创建respository， 
+先扫描repository目录，如果确认标注了 repository
+创建代理，把SimpleRepostiry的代码和动态代理一起绑定到对应的repository上
+SimpleJpaRepository包含了所有默认的方法如findAll等
+
+
+SimpleJpaRepository
+```java
+  
+/**  
+ * Creates a {@link TypedQuery} for the given {@link Specification} and {@link Sort}.  
+ * * @param returnedType must not be {@literal null}.  
+ * @param spec can be {@literal null}.  
+ * @param domainClass must not be {@literal null}.  
+ * @param sort must not be {@literal null}.  
+ * @param inputProperties must not be {@literal null}.  
+ * @param scrollPosition must not be {@literal null}.  
+ */
+private <S extends T> TypedQuery<S> getQuery(ReturnedType returnedType, @Nullable Specification<S> spec,  
+   Class<S> domainClass, Sort sort, Collection<String> inputProperties, @Nullable ScrollPosition scrollPosition) {
+   CriteriaBuilder builder = entityManager.getCriteriaBuilder();
+   
+}
+```
+
+RepositoryFactorySupport#getRepository是关键方法
+
+```mermaid
+flowchart TD
+    subgraph "Spring容器刷新流程"
+        A[AbstractApplicationContext#refresh] --> B[AbstractApplicationContext#invokeBeanFactoryPostProcessors]
+        B --> C[PostProcessorRegistrationDelegate#invokeBeanFactoryPostProcessors]
+        C --> D[PostProcessorRegistrationDelegate#invokeBeanDefinitionRegistryPostProcessors]
+        D --> E[ConfigurationClassPostProcessor#postProcessBeanDefinitionRegistry]
+        E --> F[ConfigurationClassPostProcessor#processConfigBeanDefinitions]
+        F --> G[ConfigurationClassBeanDefinitionReader#loadBeanDefinitions]
+        G --> H[ConfigurationClassBeanDefinitionReader#loadBeanDefinitionsForConfigurationClass]
+        H --> I[ConfigurationClassBeanDefinitionReader#loadBeanDefinitionsFromRegistrars]
+    end
+    
+    subgraph "注册器处理流程"
+        I --> J[LinkedHashMap#forEach]
+        J --> K[ConfigurationClassBeanDefinitionReader#lambda$loadBeanDefinitionsFromRegistrars$1]
+        K --> L[ConfigurationClassBeanDefinitionReader$$Lambda$515#accept]
+        L --> M[RepositoryBeanDefinitionRegistrarSupport#registerBeanDefinitions]
+        M --> N[JpaRepositoriesRegistrar#getExtension]
+        N --> O[JpaRepositoryConfigExtension#getRepositoryConfiguration]
+        O --> P[RepositoryConfigurationDelegate#registerRepositoriesIn]
+        P --> Q[JpaRepositoryFactoryBean#setBeanFactory]
+    end
+    
+    subgraph "Repository实现类创建流程"
+        Q --> R[JpaRepositoryFactoryBean#afterPropertiesSet]
+        R --> S[JpaRepositoryFactory#setEntityManager]
+        S --> T[RepositoryFactorySupport#getRepository]
+        T --> U[RepositoryFactorySupport#getRepositoryInformation]
+        U --> V[JpaRepositoryFactory#getTargetRepository]
+        V --> W[JpaRepositoryFactory#getTargetRepositoryViaReflection]
+        W --> X[SimpleJpaRepository#<init>]
+        X --> Y[JpaMetamodelEntityInformation#<init>]
+        
+        T --> Z[RepositoryFactorySupport#getRepositoryBaseClass]
+        Z --> AA[ProxyFactory#create]
+        AA --> AB[JdkDynamicAopProxy#invoke]
+        AB --> AC[QueryExecutorMethodInterceptor#invoke]
+        AC --> AD[CrudMethodMetadataPostProcessor#postProcess]
+    end
+    
+    classDef containerStep fill:#e6f7ff,stroke:#2563eb,stroke-width:1px
+    classDef registrarStep fill:#fffbeb,stroke:#f59e0b,stroke-width:1px
+    classDef proxyStep fill:#fef2f2,stroke:#ef4444,stroke-width:1px
+    
+    class A,B,C,D,E,F,G,H containerStep
+    class I,J,K,L,M,N,O,P,Q registrarStep
+    class R,S,T,U,V,W,X,Y,Z,AA,AB,AC,AD proxyStep
+
+```
+
+
+# Query
+SimpleJpaRepository#getQuery
+这个是使用CriteriaBuilder创建查询语句的基本逻辑，和代码比较一下。
+
+## CriteriaBuilder例子
+```java
+CriteriaBuilder cb = entityManager.getCriteriaBuilder();
+CriteriaQuery<Tuple> query = cb.createQuery(Tuple.class); // 返回 Tuple 类型
+Root<Person> root = query.from(Person.class);
+// 定义 Specification
+Specification<User> spec = (root, query, builder) -> {
+    // 创建多个条件
+    Predicate agePredicate = builder.greaterThan(root.get("age"), 18);
+    Predicate namePredicate = builder.like(root.get("name"), "%张%");
+    
+    // 使用 AND 组合条件
+    return builder.and(agePredicate, namePredicate);
+};
+
+// 在查询中应用 Specification
+Predicate finalPredicate = spec.toPredicate(root, query, builder);
+query.where(finalPredicate); // 等价于 WHERE age > 18 AND name LIKE '%张%'
+
+// 指定要查询的字段
+query.multiselect(
+    root.get("id").alias("id"),
+    root.get("name").alias("name"),
+    root.get("age").alias("age")
+);
+
+
+// 执行查询并获取结果
+List<Tuple> results = entityManager.createQuery(query).getResultList();
+
+// 遍历结果
+for (Tuple tuple : results) {
+    Long id = tuple.get("id", Long.class);    // 根据别名获取值
+    String name = tuple.get("name", String.class);
+    Integer age = tuple.get("age", Integer.class);
+    // 处理结果...
+}
+```
+
+## SimpleJpaRepository#getQuery
+```java
+CriteriaBuilder builder = entityManager.getCriteriaBuilder();
+CriteriaQuery<S> query;
+//创建query，需要确定返回值
+if (returnedType.needsCustomConstruction()) {  
+  query = (CriteriaQuery) (interfaceProjection ? builder.createTupleQuery()  
+    : builder.createQuery(returnedType.getReturnedType()));  
+} else {  
+  query = builder.createQuery(domainClass);  
+}
+//这里确定from表名和where条件
+Root<S> root = applySpecificationToCriteria(spec, domainClass, query);
+//这个是字段全选的意思，还有其他条件暂时忽略
+query.select(root);
+//排序
+query.orderBy(toOrders(sort, root, builder));
+//前面只是在组件query，这里真正的执行
+return applyRepositoryMethodMetadata(entityManager.createQuery(query));
+```
+
+
+```java
+private <S, U extends T> Root<U> applySpecificationToCriteria(@Nullable Specification<U> spec, Class<U> domainClass,
+			CriteriaQuery<S> query) {
+	// 确定表名
+	Root<U> root = query.from(domainClass);
+}
+```
+
+
+
+# 解析repository方法名
+如：findByEmail
+
+```mermaid
+graph TD
+    A[Spring容器启动] --> B[创建Repository Bean]
+    B --> C[JpaRepositoryFactoryBean#afterPropertiesSet]
+    C --> D[RepositoryFactoryBeanSupport#afterPropertiesSet]
+    D --> E[RepositoryFactorySupport#getRepository]
+    E --> F[QueryExecutorMethodInterceptor#<init>]
+    F --> G[QueryExecutorMethodInterceptor#mapMethodsToQuery]
+    G --> H[QueryExecutorMethodInterceptor#lookupQuery]
+    H --> I[JpaQueryLookupStrategy$AbstractQueryLookupStrategy#resolveQuery]
+    I --> J{查询策略类型}
+    J -->|Create| K[JpaQueryLookupStrategy$CreateQueryLookupStrategy#resolveQuery]
+    J -->|CreateIfNotFound| L[JpaQueryLookupStrategy$CreateIfNotFoundQueryLookupStrategy#resolveQuery]
+    
+    subgraph 方法解析
+        K --> M[PartTreeJpaQuery#<init>]
+        M --> N[PartTree#<init>]
+        N --> O[PartTree$Subject#<init>]
+        O --> P[PartTree$Subject#returnMaxResultsIfFirstKSubjectOrNull]
+        P --> Q[Optional#map]
+        Q --> R[PartTree$Subject$$Lambda$1389/0x000001fe4483b200#apply]
+        R --> S[PartTree$Subject#lambda$returnMaxResultsIfFirstKSubjectOrNull$1]
+    end
+    
+    subgraph Bean创建流程
+        C --> T[AbstractAutowireCapableBeanFactory#initializeBean]
+        T --> U[AbstractAutowireCapableBeanFactory#invokeInitMethods]
+        U --> V[AutowiredAnnotationBeanPostProcessor#postProcessProperties]
+        V --> W[InjectionMetadata#inject]
+        W --> X[AutowiredAnnotationBeanPostProcessor$AutowiredFieldElement#inject]
+        X --> Y[DefaultListableBeanFactory#resolveDependency]
+        Y --> Z[AbstractBeanFactory#getBean]
+        Z --> A1[AbstractBeanFactory#doGetBean]
+        A1 --> A2[DefaultSingletonBeanRegistry#getSingleton]
+        A2 --> A3[AbstractAutowireCapableBeanFactory#createBean]
+        A3 --> A4[AbstractAutowireCapableBeanFactory#doCreateBean]
+        A4 --> A5[AbstractAutowireCapableBeanFactory#populateBean]
+    end
+    
+    subgraph 懒加载处理
+        D --> A6[RepositoryFactoryBeanSupport#lambda$afterPropertiesSet$4]
+        A6 --> A7[Lazy#get]
+        A7 --> A8[Lazy#getNullable]
+        A8 --> A9[RepositoryFactoryBeanSupport$$Lambda$1223/0x000001fe44809b70#get]
+    end
+    
+    subgraph 代理创建
+        E --> B1[QueryExecutorMethodInterceptor#lambda$new$0]
+        B1 --> B2[QueryExecutorMethodInterceptor$$Lambda$1356/0x000001fe4482bdb0#apply]
+        B2 --> B3[Optional#map]
+    end
+```
